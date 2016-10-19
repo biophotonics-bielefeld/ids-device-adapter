@@ -31,7 +31,6 @@
 //LAST UPDATE:    09.04.2014 WR
 
 
-
 #ifndef _IDS_uEYE_H_
 #define _IDS_uEYE_H_
 
@@ -304,6 +303,7 @@ class CIDS_uEye : public CCameraBase<CIDS_uEye>
   int OnDropPixels(MM::PropertyBase* pProp, MM::ActionType eAct);
   int OnFractionOfPixelsToDropOrSaturate(MM::PropertyBase* pProp, MM::ActionType eAct);
   int OnGainMaster(MM::PropertyBase* pProp, MM::ActionType eAct);
+  int OnDeviceID(MM::PropertyBase* pProp, MM::ActionType eAct);
 
  private:
 

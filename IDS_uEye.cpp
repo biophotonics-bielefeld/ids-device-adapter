@@ -154,6 +154,8 @@ CIDS_uEye::CIDS_uEye() :
    SetErrorText(ERR_MEM_ALLOC, Err_MEM_ALLOC);
    SetErrorText(ERR_ROI_INVALID, Err_ROI_INVALID);
 
+   // Add an int. value to select camera (TODO: query list from driver?)
+   CreateProperty("Cam.ID", "1", MM::Integer, false, 0, true);
 
    // call the base class method to set-up default error codes/messages
    InitializeDefaultErrorMessages();
@@ -210,12 +212,20 @@ int CIDS_uEye::Initialize()
    if (initialized_)
       return DEVICE_OK;
 	
+      
+   //Open camera with ID retrieved from property
+   long tmpCamId;
+   int idRet = GetProperty("Cam.ID", tmpCamId);
+   if (idRet != DEVICE_OK ) {
+	LogMessage("IDS_uEye. Failed to load device ID. Old config?");
+	return idRet;
+   }
 
-    
-   //Open camera with ID 1
-   hCam = 1;
+   hCam = tmpCamId;
    INT nReturn = is_InitCamera (&hCam, NULL);
    
+   LogMessage("Initialized uEye with id "+hCam);
+
    if (nReturn != IS_SUCCESS){                          //could not open camera
      LogMessage("could not find a uEye camera",true);
      return ERR_CAMERA_NOT_FOUND;
@@ -696,7 +706,7 @@ int CIDS_uEye::SnapImage()
   */
   
 
-
+  
   MM::MMTime s0(0,0);
   MM::MMTime t2 = GetCurrentMMTime();
   if( s0 < startTime )
@@ -715,7 +725,7 @@ int CIDS_uEye::SnapImage()
       // need way to build the core in the test program
 
    }
-
+   
    readoutStartTime_ = GetCurrentMMTime();
 
    return DEVICE_OK;
@@ -737,7 +747,7 @@ const unsigned char* CIDS_uEye::GetImageBuffer()
   
    MMThreadGuard g(imgPixelsLock_);
    MM::MMTime readoutTime(readoutUs_);
-   while (readoutTime > (GetCurrentMMTime() - readoutStartTime_)) {}		
+   while (readoutTime > (GetCurrentMMTime() - readoutStartTime_)) {}		 
    unsigned char *pB = (unsigned char*)(img_.GetPixels());
    return pB;
 }
