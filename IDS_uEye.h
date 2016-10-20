@@ -303,7 +303,7 @@ class CIDS_uEye : public CCameraBase<CIDS_uEye>
   int OnDropPixels(MM::PropertyBase* pProp, MM::ActionType eAct);
   int OnFractionOfPixelsToDropOrSaturate(MM::PropertyBase* pProp, MM::ActionType eAct);
   int OnGainMaster(MM::PropertyBase* pProp, MM::ActionType eAct);
-  int OnDeviceID(MM::PropertyBase* pProp, MM::ActionType eAct);
+  int OnFlashMode(MM::PropertyBase* pProp, MM::ActionType eAct);
 
  private:
 
