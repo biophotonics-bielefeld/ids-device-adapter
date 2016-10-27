@@ -65,7 +65,8 @@ using namespace std;
 //
 
 #define EXPOSURE_MAX 10000               //maximal exposure (ms) to use, even if the camera reports higher values
-#define UEYE_USE_SEQUENCE_MEMORY 1	 
+#define UEYE_RINGBUFFER_SIZE 256		 //maximum size of async ringbuffer, in MB	 
+#define UEYE_MAX_RINGBUFFER_ELEMENTS 2048 //maximum number of images in ringbuffer	
 
 //////////////////////////////////////////////////////////////////////////////
 // Error codes
@@ -227,8 +228,11 @@ class CIDS_uEye : public CCameraBase<CIDS_uEye>
   char* pcImgMem;                                       //image memory
   int memPid;                                           //ID for image memory
 
-  char * ringBufImgMem_[16];								//image ringbuffer
-  int ringBufImgId_[16];
+  char * ringBufImgMem_[UEYE_MAX_RINGBUFFER_ELEMENTS];	//image ringbuffer
+  int ringBufImgId_[UEYE_MAX_RINGBUFFER_ELEMENTS];		//image ringbuffer mem ids
+  int ringBufElementCount_;								//number of allocated ringbuffer entries
+  bool ringBufOutputActive_;							//true if output goes to ringbuffer
+
 
   // MMDevice API
   // ------------
@@ -306,6 +310,7 @@ class CIDS_uEye : public CCameraBase<CIDS_uEye>
   int OnFractionOfPixelsToDropOrSaturate(MM::PropertyBase* pProp, MM::ActionType eAct);
   int OnGainMaster(MM::PropertyBase* pProp, MM::ActionType eAct);
   int OnFlashMode(MM::PropertyBase* pProp, MM::ActionType eAct);
+  int OnVideoSyncMode(MM::PropertyBase* pProp, MM::ActionType eAct);
 
  private:
 
@@ -385,12 +390,11 @@ class CIDS_uEye : public CCameraBase<CIDS_uEye>
   int ResizeImageBuffer();
 
   int SetImageMemory();
-
+  int ResizeImageRingbuffer();
+  int FreeImageRingbuffer();
+  
   int setSensorPixelParameters(WORD sensorID);
   
-
-
-
 };
 
 
