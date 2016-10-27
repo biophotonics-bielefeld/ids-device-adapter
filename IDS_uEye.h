@@ -65,7 +65,7 @@ using namespace std;
 //
 
 #define EXPOSURE_MAX 10000               //maximal exposure (ms) to use, even if the camera reports higher values
-
+#define UEYE_USE_SEQUENCE_MEMORY 1	 
 
 //////////////////////////////////////////////////////////////////////////////
 // Error codes
@@ -227,6 +227,8 @@ class CIDS_uEye : public CCameraBase<CIDS_uEye>
   char* pcImgMem;                                       //image memory
   int memPid;                                           //ID for image memory
 
+  char * ringBufImgMem_[16];								//image ringbuffer
+  int ringBufImgId_[16];
 
   // MMDevice API
   // ------------
@@ -364,7 +366,7 @@ class CIDS_uEye : public CCameraBase<CIDS_uEye>
   string binModeName_;                                          //name of the current binning mode
 
   
-
+  bool videoFastMode_;
   bool dropPixels_;
   bool saturatePixels_;
   double fractionOfPixelsToDropOrSaturate_;

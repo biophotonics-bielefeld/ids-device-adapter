@@ -152,6 +152,7 @@ CIDS_uEye::CIDS_uEye() :
    pDemoResourceLock_(0),
    triggerDevice_(""),
    dropPixels_(false),
+   videoFastMode_(true),
    fractionOfPixelsToDropOrSaturate_(0.002)
 {
    memset(testProperty_,0,sizeof(testProperty_));
@@ -641,7 +642,21 @@ int CIDS_uEye::Initialize()
    if (nReturn != IS_SUCCESS){                          //could not set time out
      printf("IDS_uEye: could not set acquisition time out\n");
    }
- 
+
+   // ---> NEW
+   // allocate ringbuffers, maximum size
+   for (int i=0; i<16; i++) {
+
+	  nRet = is_AllocImageMem (hCam, 2048, 2048, 24, &ringBufImgMem_[i], &ringBufImgId_[i]);
+      if (nRet != IS_SUCCESS){                          //could not allocate memory
+         LogMessage("could not allocate ringbuffer memory",true);
+         return ERR_MEM_ALLOC;
+      }
+
+	  nRet = is_AddToSequence( hCam, ringBufImgMem_[i], ringBufImgId_[i]);
+
+   }
+   // <--- NEW
 
    initialized_ = true;
    return DEVICE_OK;
@@ -659,10 +674,15 @@ int CIDS_uEye::Initialize()
 */
 int CIDS_uEye::Shutdown()
 {
-  
+   
+   // ---> NEW
+   is_ClearSequence( hCam );
+   for (int i=0; i<16; i++) {
+	 is_FreeImageMem( hCam, ringBufImgMem_[i], ringBufImgId_[i]);
+   }
+   // <--- NEW
 
    is_FreeImageMem (hCam, pcImgMem,  memPid);
-
    is_ExitCamera (hCam);
 
    initialized_ = false;
@@ -775,10 +795,13 @@ int CIDS_uEye::SnapImage()
 */
 const unsigned char* CIDS_uEye::GetImageBuffer()
 {
-  
-   MMThreadGuard g(imgPixelsLock_);
-   MM::MMTime readoutTime(readoutUs_);
-   while (readoutTime > (GetCurrentMMTime() - readoutStartTime_)) {}		 
+   // whatever this "readout delay time"-hack does, it has to be off for fast vidoe mode
+   if (!videoFastMode_) {
+      MMThreadGuard g(imgPixelsLock_);
+      MM::MMTime readoutTime(readoutUs_);
+      while (readoutTime > (GetCurrentMMTime() - readoutStartTime_)) {}		 
+   }
+   
    unsigned char *pB = (unsigned char*)(img_.GetPixels());
    return pB;
 }
@@ -1221,6 +1244,19 @@ int CIDS_uEye::StopSequenceAcquisition()
       
    }
 
+   // ---> NEW
+   if (videoFastMode_) {
+      int ret = is_StopLiveVideo(hCam, IS_DONT_WAIT);
+	  if (ret != IS_SUCCESS)
+         LogMessage("Camera failed to stop live video.");
+	  
+	  ret = is_ExitImageQueue(hCam);
+	  if (ret != IS_SUCCESS)
+         LogMessage("Camera failed to exit ringbuffer mode");
+	  
+   }
+   // <--- NEW
+
    if (!thd_->IsStopped()) {
       thd_->Stop();                                                       
       thd_->wait();                                                       
@@ -1245,6 +1281,33 @@ int CIDS_uEye::StartSequenceAcquisition(long numImages, double interval_ms, bool
       return ret;
    sequenceStartTime_ = GetCurrentMMTime();
    imageCounter_ = 0;
+
+   // ---> NEW
+
+   // Version via event-handlers as in the Thorlabs code...
+   /*hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+   is_InitEvent(camHandle_, hEvent, IS_SET_EVENT_FRAME);
+   is_EnableEvent(camHandle_, IS_SET_EVENT_FRAME);*/
+
+   // with sequence set to 'videoFastMode_', we'll use the
+   // async acquisition, that we need to start now
+   if (videoFastMode_) {
+
+	  // set it to run the ringbuffer mode
+      ret = is_InitImageQueue( hCam, 0 );
+	  if (ret != IS_SUCCESS) {
+         LogMessage("Camera failed to init ImageQueue");
+		 return ret;
+	  }
+
+	  // initialize the video
+	  ret = is_CaptureVideo(hCam, ACQ_TIMEOUT);
+      if (ret != IS_SUCCESS)
+        return ret;
+   }
+   
+   // <--- NEW
+
    thd_->Start(numImages,interval_ms);
    stopOnOverflow_ = stopOnOverflow;
    return DEVICE_OK;
@@ -1307,32 +1370,69 @@ int CIDS_uEye::InsertImage()
 /*
  * Do actual capturing
  * Called from inside the thread  
+ * This is called in a loop (once for each image to be acquired)
+ * from 'svc' below... it could have a more clear name
  */
 int CIDS_uEye::ThreadRun (void)
 {
   
    int ret=DEVICE_ERR;
    
-   // Trigger
-   if (triggerDevice_.length() > 0) {
-      MM::Device* triggerDev = GetDevice(triggerDevice_.c_str());
-      if (triggerDev != 0) {
-      	LogMessage("trigger requested");
-      	triggerDev->SetProperty("Trigger","+");
-      }
-   }
+   if (!videoFastMode_) {
+	   if (triggerDevice_.length() > 0) {
+		  MM::Device* triggerDev = GetDevice(triggerDevice_.c_str());
+		  if (triggerDev != 0) {
+      		LogMessage("trigger requested");
+      		triggerDev->SetProperty("Trigger","+");
+		  }
+	   }
    
-   ret = SnapImage();
-   if (ret != DEVICE_OK)
-   {
-      return ret;
+   
+	   ret = SnapImage();
+	   if (ret != DEVICE_OK)
+	   {
+		  return ret;
+	   }
+   } 
+   
+   // ---> NEW
+   // TODO: I have no idea how to get software triggering to work in this mode
+   if (videoFastMode_) {
+	   	   
+	   char * imgMem;
+	   int imgMemId;
+	   
+	   ret =  is_WaitForNextImage( hCam, ACQ_TIMEOUT, &imgMem, &imgMemId );
+	   
+	   if ( ret == IS_TIMED_OUT ) {
+		   return DEVICE_SNAP_IMAGE_FAILED;
+	   }
+	   if ( ret != IS_SUCCESS ) {
+		   return ret;
+	   }
+	   
+	   memcpy(img_.GetPixelsRW(), imgMem, img_.Width()*img_.Height()*img_.Depth());
+	   
+	   is_UnlockSeqBuf( hCam, IS_IGNORE_PARAMETER, imgMem);
+	   if ( ret != IS_SUCCESS ) {
+		   return ret;
+	   }
+
+	   ret = DEVICE_OK;
+
    }
+
+   // <--- NEW
+
    ret = InsertImage();
    if (ret != DEVICE_OK)
    {
       return ret;
    }
    return ret;
+
+
+
 };
 
 bool CIDS_uEye::IsCapturing() {
@@ -2357,6 +2457,11 @@ void CIDS_uEye::ClearImageBuffer(ImgBuffer& img)
       return;
    unsigned char* pBuf = const_cast<unsigned char*>(img.GetPixels());
    memset(pBuf, 0, img.Height()*img.Width()*img.Depth());
+
+   // free the ringbuffer
+   for (int i=0; i<16; i++) {
+	   is_FreeImageMem( hCam, ringBufImgMem_[i], ringBufImgId_[i]);
+   }
 }
 
 
@@ -2390,15 +2495,14 @@ int CIDS_uEye::SetImageMemory()
   if (nRet != IS_SUCCESS){                          //could not assign image memory
     printf("IDS_uEye: could not assign the image buffer as the image memory, error %d\n", nRet);
   }
-
-
-  
+    
   //activate the new image memory
   nRet = is_SetImageMem (hCam, pcImgMem, memPid);
   if (nRet != IS_SUCCESS){                          //could not activate image memory
     printf("IDS_uEye: could not activate image memory, error %d\n", nRet);
   }
 
+   
 
   return DEVICE_OK;
 
