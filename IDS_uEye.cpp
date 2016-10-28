@@ -179,6 +179,9 @@ CIDS_uEye::CIDS_uEye() :
    pDemoResourceLock_ = new MMThreadLock();
    thd_ = new MySequenceThread(this);
 
+   // allocate base memory for the ringbuffer
+   ringBufferBaseMemory = (char*)malloc( UEYE_RINGBUFFER_SIZE * 1024 * 1024 );
+   
    // parent ID display
    CreateHubIDProperty();
 }
@@ -193,8 +196,9 @@ CIDS_uEye::CIDS_uEye() :
 */
 CIDS_uEye::~CIDS_uEye()
 {
-   StopSequenceAcquisition();
-   FreeImageRingbuffer();
+   DeassignRingbuffers();
+   free( ringBufferBaseMemory );
+
    delete thd_;
    delete pDemoResourceLock_;
 }
@@ -241,10 +245,12 @@ int CIDS_uEye::Initialize()
    hCam = tmpCamId;
    INT nReturn = is_InitCamera (&hCam, NULL);
    
-   LogMessage("Initialized uEye with id "+hCam);
+   char tmpChars[128];
+   snprintf(tmpChars, 127, "IDS_uEye: Initialized uEye with id %d", hCam);
+   LogMessage(tmpChars);
 
    if (nReturn != IS_SUCCESS){                          //could not open camera
-     LogMessage("could not find a uEye camera",true);
+     LogMessage("IDS_uEye: could not find a uEye camera",true);
      return ERR_CAMERA_NOT_FOUND;
    }
 
@@ -253,7 +259,7 @@ int CIDS_uEye::Initialize()
    CAMINFO camInfo;
    nReturn=is_GetCameraInfo (hCam, &camInfo);
    if(nReturn != IS_SUCCESS){
-     LogMessage("could not obtain camera properties",true);
+     LogMessage("IDS_uEye: could not obtain camera properties",true);
    }
    if(nReturn == IS_SUCCESS){
 
@@ -605,13 +611,10 @@ int CIDS_uEye::Initialize()
 
    //clear image buffer
    ClearImageBuffer(img_);
-
-   
-
+ 
    //allocate image memory
-   //SetImageMemory(); (is called by ResizeImageRingbuffer)
-   ResizeImageRingbuffer();
-   
+   SetImageMemory();
+     
    //reset ROI
    ClearROI();  
 
@@ -660,8 +663,7 @@ int CIDS_uEye::Initialize()
      printf("IDS_uEye: could not set acquisition time out\n");
    }
 
-   
-  
+     
    initialized_ = true;
    return DEVICE_OK;
 }
@@ -678,12 +680,11 @@ int CIDS_uEye::Initialize()
 */
 int CIDS_uEye::Shutdown()
 {
-  
-   FreeImageRingbuffer();
-
+	   
+   DeassignRingbuffers();
    is_FreeImageMem (hCam, pcImgMem,  memPid);
    is_ExitCamera (hCam);
-
+   
    initialized_ = false;
    return DEVICE_OK;
 }
@@ -705,7 +706,7 @@ int CIDS_uEye::SnapImage()
   // we have to reset the output to the correct buffer (stopping the thread will do so)
   if (ringBufOutputActive_) {
 		StopSequenceAcquisition();
-		LogMessage("IDS_uEye: unclean acquisition stop, resetting output", true);
+		LogMessage("IDS_uEye: 'snap' found unclean sequence acquisition stop, resetting output", true);
   }
 
 
@@ -731,6 +732,11 @@ int CIDS_uEye::SnapImage()
     }
   }
   
+  // retrieve the image info
+  int ret = is_GetImageInfo( hCam, memPid, &imgInfo_, sizeof( UEYEIMAGEINFO ));
+  if ( ret != IS_SUCCESS ) {
+	 LogMessage( "IDS_uEye: ERR failed to retrive image info in snap" );
+  }
 
   /*
   //copy image into the buffer (not needed if the buffer is assigned directly via SetAllocatedImageMem)
@@ -776,6 +782,7 @@ int CIDS_uEye::SnapImage()
         naptime = 1;
       // longest possible nap is about 38 minutes
       CDeviceUtils::NapMicros((unsigned long) naptime);
+
    }
   else
     {
@@ -947,8 +954,8 @@ int CIDS_uEye::SetROI(unsigned x, unsigned y, unsigned xSize, unsigned ySize)
       is_FreeImageMem (hCam, pcImgMem,  memPid);
       ResizeImageBuffer();
       ClearImageBuffer(img_);
-      //SetImageMemory(); (is called by ResizeImageRingbuffer)
-      ResizeImageRingbuffer();
+	  SetImageMemory(); 
+      
       
       //update frame rate range
       GetFramerateRange(hCam, &framerateMin_, &framerateMax_);
@@ -1027,8 +1034,7 @@ int CIDS_uEye::ClearROI()
     is_FreeImageMem (hCam, pcImgMem,  memPid);
     ResizeImageBuffer();
     ClearImageBuffer(img_);
-    //SetImageMemory(); (is called by ResizeImageRingbuffer)
-    ResizeImageRingbuffer();
+    SetImageMemory(); 
           
 
     //update pixel clock range
@@ -1254,7 +1260,7 @@ int CIDS_uEye::StopSequenceAcquisition()
    }
 
    // ---> NEW
-   if (videoFastMode_) {
+   if (videoFastMode_ || ringBufOutputActive_ ) {
       int ret = is_StopLiveVideo(hCam, IS_DONT_WAIT);
 	  if (ret != IS_SUCCESS)
          LogMessage("IDS_uEye: Camera failed to stop live video.");
@@ -1316,13 +1322,13 @@ int CIDS_uEye::StartSequenceAcquisition(long numImages, double interval_ms, bool
 	 // we have to reset the output to the correct buffer (stopping the thread will do so)
 	 if (ringBufOutputActive_) {
 	 	StopSequenceAcquisition();
-	 	LogMessage("IDS_uEye: unclean acquisition stop, resetting output", true);
+	 	LogMessage("IDS_uEye: sequence found unclean acquisition stop, resetting output", true);
 	 }
 		
 	  // set it to run the ringbuffer mode
       ret = is_InitImageQueue( hCam, 0 );
 	  if (ret != IS_SUCCESS) {
-         LogMessage("Camera failed to init ImageQueue");
+         LogMessage("IDS_uEye: Camera failed to init ImageQueue");
 		 return ret;
 	  }
 
@@ -1343,7 +1349,7 @@ int CIDS_uEye::StartSequenceAcquisition(long numImages, double interval_ms, bool
    thd_->Start(numImages,interval_ms);
    stopOnOverflow_ = stopOnOverflow;
 
-   LogMessage("IDS_uEye: Started sequence acquisition", true);
+   //LogMessage("IDS_uEye: Started sequence acquisition", true);
    return DEVICE_OK;
 }
 
@@ -1376,6 +1382,28 @@ int CIDS_uEye::InsertImage()
    md.put(MM::g_Keyword_Metadata_ImageNumber, CDeviceUtils::ConvertToString(imageCounter_));
    md.put(MM::g_Keyword_Metadata_ROI_X, CDeviceUtils::ConvertToString( (long) roiX_)); 
    md.put(MM::g_Keyword_Metadata_ROI_Y, CDeviceUtils::ConvertToString( (long) roiY_)); 
+  
+   // Add a timestamp
+   char tStamp[128], tStampRaw[64];
+   snprintf(tStamp, 127, "uEye-%d-time [%04d-%02d-%02dT%02d:%02d:%02d.%04d]", hCam,
+	   imgInfo_.TimestampSystem.wYear,
+	   imgInfo_.TimestampSystem.wMonth,
+	   imgInfo_.TimestampSystem.wDay,
+	   imgInfo_.TimestampSystem.wHour,
+	   imgInfo_.TimestampSystem.wMinute,
+	   imgInfo_.TimestampSystem.wSecond,
+	   imgInfo_.TimestampSystem.wMilliseconds );
+
+   snprintf(tStampRaw, 63, "t:[%lu] io:[%d] prc: [%ld]", 
+	   imgInfo_.u64TimestampDevice, 
+	   imgInfo_.dwIoStatus,
+	   imgInfo_.dwHostProcessTime );
+
+   md.put("uEye-Timestamp", tStamp);
+   md.put("uEye-rawStamp", tStampRaw);
+
+   //md.put(MM::g_Keyword_Label, tStamp);
+
 
    imageCounter_++;
 
@@ -1436,19 +1464,46 @@ int CIDS_uEye::ThreadRun (void)
 	   char * imgMem;
 	   int imgSeqId;
 	   
+	   // wait for the image to arrive in the ringbuffer
 	   ret =  is_WaitForNextImage( hCam, ACQ_TIMEOUT, &imgMem, &imgSeqId );
-	   
-	   if ( ret == IS_TIMED_OUT ) {
+	   	   if ( ret == IS_TIMED_OUT ) {
+		   is_UnlockSeqBuf( hCam, imgSeqId, imgMem);
 		   return DEVICE_SNAP_IMAGE_FAILED;
 	   }
 	   if ( ret != IS_SUCCESS ) {
+		   is_UnlockSeqBuf( hCam, imgSeqId, imgMem);
+		   char err[128];
+		   snprintf( err, 127, "IDS_uEye: ERR waiting for image, #%d ", ret );
+		   LogMessage( err );
+		   // this seems to happen from time to time...
+		   if ( ret == 3 )
+			   return DEVICE_NOT_CONNECTED;
 		   return ret;
 	   }
 	   
-	   memcpy(img_.GetPixelsRW(), imgMem, img_.Width()*img_.Height()*img_.Depth());
-	   
-	   is_UnlockSeqBuf( hCam, imgSeqId, imgMem);
+	   // retrieve the image info
+	   ret = is_GetImageInfo( hCam, imgSeqId, &imgInfo_, sizeof( UEYEIMAGEINFO ));
 	   if ( ret != IS_SUCCESS ) {
+		   LogMessage( "IDS_uEye: ERR failed to retrive image info in sequence" );
+	   }
+
+	   // copy the image into the output buffer
+	   //memcpy(img_.GetPixelsRW(), imgMem, img_.Width()*img_.Height()*img_.Depth());
+	   ret = is_CopyImageMem( hCam, imgMem, imgSeqId, (char*)img_.GetPixelsRW() );
+	   if ( ret != IS_SUCCESS ) {
+		   is_UnlockSeqBuf( hCam, imgSeqId, imgMem);
+		   char err[128];
+		   snprintf( err, 127, "IDS_uEye: ERR copying image, #%d ", ret );
+		   LogMessage( err );
+		   return ret;
+	   }
+	   
+	   // unlock the ringbuffer position
+	   ret = is_UnlockSeqBuf( hCam, imgSeqId, imgMem);
+	   if ( ret != IS_SUCCESS ) {
+		   char err[128];
+		   snprintf( err, 127, "IDS_uEye: ERR unlocking the ringbuffer, #%d ", ret );
+		   LogMessage( err );
 		   return ret;
 	   }
 
@@ -1549,14 +1604,34 @@ void MySequenceThread::Resume() {
 int MySequenceThread::svc(void) throw()
 {
    int ret=DEVICE_ERR;
+   int retryCount=0;
+
    try 
    {
       do
       {  
          ret=camera_->ThreadRun();
-      } while (DEVICE_OK == ret && !IsStopped() && imageCounter_++ < numImages_-1);
-      if (IsStopped())
-         camera_->LogMessage("SeqAcquisition interrupted by the user", true);
+		 
+		 // Sometimes, the async mode seems to fail with error 3 (IDS "IS_CANT_OPEN_DEVICE"),
+		 // but recoveres quickly... in this case, just try again
+		 if (ret == DEVICE_NOT_CONNECTED) {
+			retryCount++;
+			ret = DEVICE_OK;
+			char err[128];
+			snprintf(err,127,"IDS_uEye: ERR 3, dev not connected, retry %d / %d", retryCount, UEYE_MAX_ASYNC_RETRIEVE_RETRY);
+			camera_->LogMessage(err);
+			CDeviceUtils::SleepMs(3);
+		 
+		 } else {
+			retryCount=0;
+			imageCounter_++;
+		 }
+		 
+      } while (DEVICE_OK == ret && !IsStopped() && (imageCounter_ < numImages_) && !(retryCount > UEYE_MAX_ASYNC_RETRIEVE_RETRY));
+      
+	  if (IsStopped())
+         camera_->LogMessage("IDS_uEye: SeqAcquisition interrupted by the user", true);
+	  	 
    }catch(...){
       camera_->LogMessage(g_Msg_EXCEPTION_IN_THREAD, false);
    }
@@ -1628,8 +1703,7 @@ int CIDS_uEye::OnBinning(MM::PropertyBase* pProp, MM::ActionType eAct)
       is_FreeImageMem (hCam, pcImgMem,  memPid);
       ResizeImageBuffer();
       ClearImageBuffer(img_);
-      //SetImageMemory(); (is called by ResizeImageRingbuffer)
-      ResizeImageRingbuffer();
+      SetImageMemory(); 
 
 
       //update frame rate range
@@ -1974,8 +2048,7 @@ int CIDS_uEye::OnPixelType(MM::PropertyBase* pProp, MM::ActionType eAct)
       is_FreeImageMem (hCam, pcImgMem,  memPid);
       ResizeImageBuffer();
       ClearImageBuffer(img_);
-      //SetImageMemory(); (is called by ResizeImageRingbuffer)
-      ResizeImageRingbuffer();;
+      SetImageMemory(); 
     }
 
   }
@@ -2535,11 +2608,6 @@ void CIDS_uEye::ClearImageBuffer(ImgBuffer& img)
       return;
    unsigned char* pBuf = const_cast<unsigned char*>(img.GetPixels());
    memset(pBuf, 0, img.Height()*img.Width()*img.Depth());
-
-   // free the ringbuffer
-   for (int i=0; i<16; i++) {
-	   is_FreeImageMem( hCam, ringBufImgMem_[i], ringBufImgId_[i]);
-   }
 }
 
 
@@ -2549,20 +2617,24 @@ int CIDS_uEye::SetImageMemory()
 
   int nRet;
 
+  // lets just try to do the ringbuffer size reassignment here ...
+  AssignRingbuffers();
+
+
   // directly assign the buffer to the camera
   pcImgMem=(char*)img_.GetPixelsRW();
   nRet = is_SetAllocatedImageMem (hCam, roiXSizeReal_/binX_, roiYSizeReal_/binY_, 8*img_.Depth(), pcImgMem, &memPid);
   if (nRet != IS_SUCCESS){                          //could not assign image memory
-    LogMessage("IDS_uEye: could not assign the image buffer as the image memory, error "+nRet, true);
+    LogMessage("IDS_uEye: could not assign the image buffer as the image memory, error ");
   }
     
   //activate the new image memory
   nRet = is_SetImageMem (hCam, pcImgMem, memPid);
   if (nRet != IS_SUCCESS){                          //could not activate image memory
-    LogMessage("IDS_uEye: could not activate image memory, error "+nRet, true);
+    LogMessage("IDS_uEye: could not activate image memory, error ");
   }
   
-  LogMessage("Activated image memory for snap");
+  LogMessage("IDS_uEye: Activated image memory for snap");
 
   return DEVICE_OK;
 
@@ -2576,68 +2648,97 @@ void CIDS_uEye::TestResourceLocking(const bool recurse)
       TestResourceLocking(false);
 }
 
-// --> NEW
 
-/** Create and register a set of ringbuffers matching the
- currently set ROI size. This frees any memory currently in use
- as a ringbuffer. */
-int CIDS_uEye::ResizeImageRingbuffer() {
+/** Divides the chuck of ringbuffer memory into image-sized portions and registeres it with the driver */
+int CIDS_uEye::AssignRingbuffers() {
 
    int nRet = DEVICE_ERR;
-   // clear previous buffers
-   nRet = FreeImageRingbuffer();
    
-   // size calculation
-   int bytePerImage = (roiXSizeReal_/binX_)*(roiYSizeReal_/binY_)*(8*img_.Depth());
+   // first, clear any previous assignment
+   if (ringBufElementCount_ > 0 ) {
+	   DeassignRingbuffers();
+   }
+
+   // size calculation (simplyfied, max. image 1024x1024
+   int bytePerImage = (roiXSizeReal_/binX_+8) * (roiYSizeReal_/binY_+8) * ( img_.Depth() );
    ringBufElementCount_ = (UEYE_RINGBUFFER_SIZE*1024*1024) / bytePerImage ;
-   if (ringBufElementCount_>UEYE_MAX_RINGBUFFER_ELEMENTS)  {
+   
+   if ( ringBufElementCount_ > UEYE_MAX_RINGBUFFER_ELEMENTS ) {
 	   ringBufElementCount_ = UEYE_MAX_RINGBUFFER_ELEMENTS;
    }
 
-   LogMessage("IDS_uEye: Allocating "+to_string((long double)ringBufElementCount_)+" buffers", true);
-
    // allocate the buffers
    for (int i=0; i<ringBufElementCount_; i++) {
+ 
+	  ringBufImgMem_[i] = &ringBufferBaseMemory[i * bytePerImage] ;
 
-	  nRet = is_AllocImageMem (hCam,  roiXSizeReal_/binX_+8, roiYSizeReal_/binY_+8, 8*img_.Depth(), &ringBufImgMem_[i], &ringBufImgId_[i]);
-      if (nRet != IS_SUCCESS) {                          
-         LogMessage("could not allocate ringbuffer memory",true);
-         return ERR_MEM_ALLOC;
+      nRet = is_SetAllocatedImageMem(hCam,  roiXSizeReal_/binX_+8, roiYSizeReal_/binY_+8, 8*img_.Depth(), ringBufImgMem_[i], &ringBufImgId_[i]);
+	  //nRet = is_AllocImageMem(hCam,  roiXSizeReal_/binX_+8, roiYSizeReal_/binY_+8, 8*img_.Depth(), &ringBufImgMem_[i], &ringBufImgId_[i]);
+
+	  // error handling, for out-of-ram
+	  if (nRet != IS_SUCCESS) {                          
+         LogMessage("IDS_uEye ERR: could not allocate ringbuffer");
+		 ringBufElementCount_ = i;
+		 return ERR_MEM_ALLOC;
       }
 
+	  // error handling, add to sequence fails
 	  nRet = is_AddToSequence( hCam, ringBufImgMem_[i], ringBufImgId_[i]);
 	   if (nRet != IS_SUCCESS){                          
-         LogMessage("could not allocate ringbuffer memory",true);
+         LogMessage("IDS_uEye ERR: could not add image buffer to ringbuffer sequence");
          return ERR_MEM_ALLOC;
       }
+   
+	  //char out[128];
+	  //snprintf(out,127,"IDS_uEye: registered buffer %ld %d ", ringBufImgMem_[i], ringBufImgId_[i]);
+	  //LogMessage(out, true);
+   
    }   
 
-   // this lets 'snapshot' work
-   nRet = SetImageMemory();
-   return nRet;
+   LogMessage("IDS_uEye: Allocated "+to_string((long double)ringBufElementCount_)+" buffers at "+
+	   to_string((long double)bytePerImage)+" bytes per image");
+      
+   return DEVICE_OK;
 
 }
 
-/** Free the ringbuffer */
-int CIDS_uEye::FreeImageRingbuffer() {
+/** Tries to free all memory allocated for the image ringbuffer. Currently really likes
+ to fail with unspecific errors... this is why there is no dynamic reassigment of the buffers
+ currently */
 
+int CIDS_uEye::DeassignRingbuffers() {
+	   
    int nRet = DEVICE_ERR;
-      
+  
+
    if (ringBufOutputActive_) {
+	   LogMessage("IDS_uEye: deassing rinbuffer: output still active, deactivating");
 	   StopSequenceAcquisition();
    } 
 
-   is_ClearSequence( hCam );
    
+   nRet = is_ClearSequence( hCam );
+
+   if ( nRet != IS_SUCCESS ) {
+	   char err[128]; 
+	   snprintf(err,127,"IDS_uEye ERR: Failed to clear sequence (err# %d)",nRet);
+	   LogMessage(err);
+   } 
+      
    for (int i=0; i<ringBufElementCount_; i++) {
 	 nRet = is_FreeImageMem( hCam, ringBufImgMem_[i], ringBufImgId_[i]);
-	 /*
 	 if ( nRet != IS_SUCCESS ) {
-		return DEVICE_ERR;
-	 } */
+	   char err[256]; 
+	   snprintf(err,255,"IDS_uEye ERR: Failed to deassign image mem from ringbuffer (err# %d) %ld %d",nRet,  ringBufImgMem_[i], ringBufImgId_[i]);
+	   LogMessage(err);
+	 } 
    }
+
+   ringBufElementCount_ = 0;
+   LogMessage("IDS_uEye: deassign image ringbuffer");
 
    return DEVICE_OK;
 }
 
-// <-- NEW
+
+
