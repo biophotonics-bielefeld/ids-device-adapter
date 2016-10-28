@@ -1333,12 +1333,7 @@ int CIDS_uEye::StartSequenceAcquisition(long numImages, double interval_ms, bool
 	  }
 
 	  ringBufOutputActive_ = true;
-
-	  // initialize the video
-	  ret = is_CaptureVideo(hCam, ACQ_TIMEOUT);
-      if (ret != IS_SUCCESS)
-        return ret;
-
+	  	 
 	  LogMessage("IDS_uEye: Starting buffered async acquisition", true);
    } else {
 	  LogMessage("IDS_uEye: Starting standard acquisition", true);
@@ -1605,7 +1600,21 @@ int MySequenceThread::svc(void) throw()
 {
    int ret=DEVICE_ERR;
    int retryCount=0;
-
+    
+   // moved initializing the video capture into this
+   // thread for startup performance reasons
+   if (camera_->videoFastMode_) {
+	   // initialize the video
+	  int nret = is_CaptureVideo(camera_->hCam, ACQ_TIMEOUT);
+      if (nret != IS_SUCCESS) {
+		  char err[128];
+		  snprintf(err,127,"IDS_uEye: Error starting up async video mode, err #%d", nret);
+          camera_->LogMessage(err);
+		  return DEVICE_ERR;
+	  }
+   }
+   
+   // loop for images
    try 
    {
       do
