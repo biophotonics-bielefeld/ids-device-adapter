@@ -313,6 +313,8 @@ class CIDS_uEye : public CCameraBase<CIDS_uEye>
   int OnGainMaster(MM::PropertyBase* pProp, MM::ActionType eAct);
   int OnFlashMode(MM::PropertyBase* pProp, MM::ActionType eAct);
   int OnVideoSyncMode(MM::PropertyBase* pProp, MM::ActionType eAct);
+  int OnGpioSeqTrigger(MM::PropertyBase* pProp, MM::ActionType eAct);
+
 
  private:
 
@@ -376,6 +378,8 @@ class CIDS_uEye : public CCameraBase<CIDS_uEye>
 
   
   bool videoFastMode_;
+  int  gpioOutputMode_;
+  
   bool dropPixels_;
   bool saturatePixels_;
   double fractionOfPixelsToDropOrSaturate_;

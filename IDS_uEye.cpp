@@ -92,6 +92,9 @@ const char* g_FlashMode_FREERUN_HI_ACT ="freerun hi act";
 const char* g_VideoMode_STANDARD = "standard sync";
 const char* g_VideoMode_BUFFERED = "buffered burst async";
 
+const char* g_GpioSignal_OFF = "off";
+const char* g_GpioSignal_GPIO1  = "GPIO1 on start";
+
 
 ///////////////////////////////////////////////////////////////////////////////
 // Exported MMDevice API
@@ -157,6 +160,7 @@ CIDS_uEye::CIDS_uEye() :
    triggerDevice_(""),
    dropPixels_(false),
    videoFastMode_(true),
+   gpioOutputMode_(0),
    ringBufElementCount_(0),
    ringBufOutputActive_(false),
    fractionOfPixelsToDropOrSaturate_(0.002)
@@ -586,7 +590,21 @@ int CIDS_uEye::Initialize()
 
    nRet = SetAllowedValues("Video Mode", videoModes);
    if (nRet != DEVICE_OK)
-      return nRet;
+	   return nRet;
+
+   // GPIO to signal seq start
+   pAct = new CPropertyAction (this, &CIDS_uEye::OnGpioSeqTrigger);
+   nRet = CreateProperty("Signal Sequence GPIO", g_GpioSignal_OFF, MM::String, false, pAct);
+   assert(nRet == DEVICE_OK);
+
+   vector<string> gpioModes;
+   gpioModes.push_back( g_GpioSignal_OFF );
+   gpioModes.push_back( g_GpioSignal_GPIO1 );
+
+   nRet = SetAllowedValues("Signal Sequence GPIO", gpioModes);
+   if (nRet != DEVICE_OK)
+	   return nRet;
+
 
    // synchronize all properties
    // --------------------------
@@ -1600,20 +1618,60 @@ int MySequenceThread::svc(void) throw()
 {
    int ret=DEVICE_ERR;
    int retryCount=0;
-    
+   
    // moved initializing the video capture into this
    // thread for startup performance reasons
    if (camera_->videoFastMode_) {
 	   // initialize the video
-	  int nret = is_CaptureVideo(camera_->hCam, ACQ_TIMEOUT);
+
+	  camera_->LogMessage("IDS_uEye: Starting 'is_CaptureVideo'");
+	  //int nret = is_CaptureVideo(camera_->hCam, ACQ_TIMEOUT);
+	  int nret = is_CaptureVideo(camera_->hCam, IS_DONT_WAIT);
       if (nret != IS_SUCCESS) {
 		  char err[128];
 		  snprintf(err,127,"IDS_uEye: Error starting up async video mode, err #%d", nret);
           camera_->LogMessage(err);
 		  return DEVICE_ERR;
-	  }
+	  } 
+	  camera_->LogMessage("IDS_uEye: 'is_CaptureVideo' now running ");
    }
    
+   // trigger external hardware via GPIO
+   if ( camera_->gpioOutputMode_ == 1 ) {
+	   int nRet = IS_SUCCESS;
+	   
+	   // busy-wait for 5 ms
+	   MM::MMTime startTime = camera_->GetCurrentMMTime();
+	   MM::MMTime waitLength(5000);
+       while (waitLength > (camera_->GetCurrentMMTime() - startTime)) {}	
+
+	   // set the pin high
+	   IO_GPIO_CONFIGURATION gpioConfiguration;
+	   gpioConfiguration.u32Gpio = IO_GPIO_1;
+	   gpioConfiguration.u32Configuration = IS_GPIO_OUTPUT;
+	   gpioConfiguration.u32State = 1;
+
+	   nRet = is_IO(camera_->hCam, IS_IO_CMD_GPIOS_SET_CONFIGURATION, (void*)&gpioConfiguration,
+            sizeof(gpioConfiguration));
+
+	   // busy-wait for 500 us
+	   startTime = camera_->GetCurrentMMTime();
+	   MM::MMTime pulseLength(500);
+       while (pulseLength > (camera_->GetCurrentMMTime() - startTime)) {}	
+
+	   // set the pin low
+	   gpioConfiguration.u32Gpio = IO_GPIO_1;
+	   gpioConfiguration.u32Configuration = IS_GPIO_OUTPUT;
+	   gpioConfiguration.u32State = 0;
+
+	   nRet = is_IO(camera_->hCam, IS_IO_CMD_GPIOS_SET_CONFIGURATION, (void*)&gpioConfiguration,
+            sizeof(gpioConfiguration));
+
+
+   }
+
+
+
    // loop for images
    try 
    {
@@ -2500,6 +2558,60 @@ int CIDS_uEye::OnVideoSyncMode(MM::PropertyBase* pProp, MM::ActionType eAct)
   return DEVICE_INVALID_PROPERTY_VALUE;
 }
 
+/** Handles switches in gpio output mode */
+int CIDS_uEye::OnGpioSeqTrigger(MM::PropertyBase* pProp, MM::ActionType eAct)
+{
+   
+  // no need to read anything from camera
+  if (eAct == MM::BeforeGet) {
+	if (gpioOutputMode_ == 0)
+		pProp->Set(g_GpioSignal_OFF);
+	else
+		pProp->Set(g_GpioSignal_GPIO1);
+		
+	return DEVICE_OK;
+  }
+
+  // set videoFast on or off
+  if (eAct == MM::AfterSet) {
+
+    if (IsCapturing())
+		return DEVICE_CAMERA_BUSY_ACQUIRING;
+
+    string gpioSyncMode;
+    pProp->Get(gpioSyncMode);
+	
+	// see if we switch on or off (currently no GPIO2, etc).
+    if (gpioSyncMode.compare( g_GpioSignal_OFF )  == 0 ) {
+       gpioOutputMode_ = 0;
+	} else {
+	   gpioOutputMode_ = 1;
+	}
+
+
+	int nRet = IS_SUCCESS;
+	IO_GPIO_CONFIGURATION gpioConfiguration;
+	   
+	gpioConfiguration.u32Gpio = IO_GPIO_1;
+	gpioConfiguration.u32Configuration = IS_GPIO_OUTPUT; 
+	//(gpioOutputMode_ == 0)?(IS_GPIO_INPUT):(IS_GPIO_OUTPUT);
+    gpioConfiguration.u32State = 0; //(gpioOutputMode_ == 0)?(1):(0);
+
+	nRet = is_IO(hCam, IS_IO_CMD_GPIOS_SET_CONFIGURATION, (void*)&gpioConfiguration,
+            sizeof(gpioConfiguration));
+
+	const char * outWhat = (gpioOutputMode_==0)?("IDS_uEye: GPIO off"):("IDS_uEye: GPIO on");
+
+	LogMessage(outWhat, true);
+	if (nRet == IS_SUCCESS) 
+	  return DEVICE_OK;  
+	else
+	  return DEVICE_ERR;
+
+  }
+	 
+  return DEVICE_INVALID_PROPERTY_VALUE;
+}
 
 
 
