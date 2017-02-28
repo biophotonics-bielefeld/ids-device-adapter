@@ -514,7 +514,7 @@ int CIDS_uEye::Initialize()
    nRet = CreateProperty(MM::g_Keyword_Offset, "0", MM::Integer, false);
    assert(nRet == DEVICE_OK);
 
-   // readout time
+   // ReadoutTime
    pAct = new CPropertyAction (this, &CIDS_uEye::OnReadoutTime);
    nRet = CreateProperty(MM::g_Keyword_ReadoutTime, "0", MM::Float, false, pAct);
    assert(nRet == DEVICE_OK);
@@ -604,6 +604,20 @@ int CIDS_uEye::Initialize()
    nRet = SetAllowedValues("Signal Sequence GPIO", gpioModes);
    if (nRet != DEVICE_OK)
 	   return nRet;
+
+   
+   // Number to retries on USB connection error
+   pAct = new CPropertyAction (this, &CIDS_uEye::OnUsbRetryMax);
+   nRet = CreateProperty("USB maximum retry", "20", MM::Integer, false, pAct);
+   SetPropertyLimits("USB maximum retry", 10, 1000);
+   assert(nRet == DEVICE_OK);
+
+   // Sleep time after USB connection error
+   pAct = new CPropertyAction (this, &CIDS_uEye::OnUsbRetrySleep);
+   nRet = CreateProperty("USB sleep before retry", "2", MM::Integer, false, pAct);
+   SetPropertyLimits("USB sleep before retry", 0, 100);
+   assert(nRet == DEVICE_OK);
+
 
 
    // synchronize all properties
@@ -1292,7 +1306,19 @@ int CIDS_uEye::StopSequenceAcquisition()
 	  if (ret != IS_SUCCESS)
          LogMessage("IDS_uEye: Camera failed to set frame buffer address");
 		 */
-	  
+
+	  // directly signal on external pin that acq. has stopped
+	  if (gpioOutputMode_ == 1 ) {
+		 
+		 IO_GPIO_CONFIGURATION gpioConfiguration;
+	     gpioConfiguration.u32Gpio = IO_GPIO_1;
+	     gpioConfiguration.u32Configuration = IS_GPIO_OUTPUT;
+	     gpioConfiguration.u32State = 0;
+
+	     is_IO(hCam, IS_IO_CMD_GPIOS_SET_CONFIGURATION, (void*)&gpioConfiguration,
+            sizeof(gpioConfiguration));
+	  }
+
 	  ringBufOutputActive_ = false;
 	  //SetImageMemory();
    }
@@ -1417,7 +1443,7 @@ int CIDS_uEye::InsertImage()
 
    //md.put(MM::g_Keyword_Label, tStamp);
 
-
+   
    imageCounter_++;
 
    char buf[MM::MaxStrLength];
@@ -1625,8 +1651,12 @@ int MySequenceThread::svc(void) throw()
 	   // initialize the video
 
 	  camera_->LogMessage("IDS_uEye: Starting 'is_CaptureVideo'");
-	  //int nret = is_CaptureVideo(camera_->hCam, ACQ_TIMEOUT);
-	  int nret = is_CaptureVideo(camera_->hCam, IS_DONT_WAIT);
+	  int nret = IS_SUCCESS;
+	  if ( camera_->gpioOutputMode_ == 1 )
+		  nret = is_CaptureVideo(camera_->hCam, IS_DONT_WAIT);
+	  else
+		  nret = is_CaptureVideo(camera_->hCam, ACQ_TIMEOUT);
+	      
       if (nret != IS_SUCCESS) {
 		  char err[128];
 		  snprintf(err,127,"IDS_uEye: Error starting up async video mode, err #%d", nret);
@@ -1639,12 +1669,8 @@ int MySequenceThread::svc(void) throw()
    // trigger external hardware via GPIO
    if ( camera_->gpioOutputMode_ == 1 ) {
 	   int nRet = IS_SUCCESS;
+	      
 	   
-	   // busy-wait for 5 ms
-	   MM::MMTime startTime = camera_->GetCurrentMMTime();
-	   MM::MMTime waitLength(5000);
-       while (waitLength > (camera_->GetCurrentMMTime() - startTime)) {}	
-
 	   // set the pin high
 	   IO_GPIO_CONFIGURATION gpioConfiguration;
 	   gpioConfiguration.u32Gpio = IO_GPIO_1;
@@ -1653,24 +1679,8 @@ int MySequenceThread::svc(void) throw()
 
 	   nRet = is_IO(camera_->hCam, IS_IO_CMD_GPIOS_SET_CONFIGURATION, (void*)&gpioConfiguration,
             sizeof(gpioConfiguration));
-
-	   // busy-wait for 500 us
-	   startTime = camera_->GetCurrentMMTime();
-	   MM::MMTime pulseLength(500);
-       while (pulseLength > (camera_->GetCurrentMMTime() - startTime)) {}	
-
-	   // set the pin low
-	   gpioConfiguration.u32Gpio = IO_GPIO_1;
-	   gpioConfiguration.u32Configuration = IS_GPIO_OUTPUT;
-	   gpioConfiguration.u32State = 0;
-
-	   nRet = is_IO(camera_->hCam, IS_IO_CMD_GPIOS_SET_CONFIGURATION, (void*)&gpioConfiguration,
-            sizeof(gpioConfiguration));
-
-
    }
-
-
+   
 
    // loop for images
    try 
@@ -1685,16 +1695,28 @@ int MySequenceThread::svc(void) throw()
 			retryCount++;
 			ret = DEVICE_OK;
 			char err[128];
-			snprintf(err,127,"IDS_uEye: ERR 3, dev not connected, retry %d / %d", retryCount, UEYE_MAX_ASYNC_RETRIEVE_RETRY);
+			snprintf(err,127,"IDS_uEye: ERR 3, dev not connected, retry %d / %d", retryCount, camera_->usbRetryMax_);
 			camera_->LogMessage(err);
-			CDeviceUtils::SleepMs(3);
-		 
+			CDeviceUtils::SleepMs(camera_->usbRetrySleep_);
 		 } else {
 			retryCount=0;
 			imageCounter_++;
 		 }
 		 
-      } while (DEVICE_OK == ret && !IsStopped() && (imageCounter_ < numImages_) && !(retryCount > UEYE_MAX_ASYNC_RETRIEVE_RETRY));
+	  } while (DEVICE_OK == ret && !IsStopped() && (imageCounter_ < numImages_) && !(retryCount >= camera_->usbRetryMax_));
+
+	  // set the output pin low again
+	  if (camera_->gpioOutputMode_ == 1 ) {
+
+	     // set the pin low
+		 IO_GPIO_CONFIGURATION gpioConfiguration;
+		 gpioConfiguration.u32Gpio = IO_GPIO_1;
+	     gpioConfiguration.u32Configuration = IS_GPIO_OUTPUT;
+	     gpioConfiguration.u32State = 0;
+
+	     is_IO(camera_->hCam, IS_IO_CMD_GPIOS_SET_CONFIGURATION, (void*)&gpioConfiguration,
+            sizeof(gpioConfiguration));
+	  }
       
 	  if (IsStopped())
          camera_->LogMessage("IDS_uEye: SeqAcquisition interrupted by the user", true);
@@ -2148,6 +2170,51 @@ int CIDS_uEye::OnReadoutTime(MM::PropertyBase* pProp, MM::ActionType eAct)
 
    return DEVICE_OK;
 }
+
+
+/**
+* Handles "UsbRetryMax" property.
+*/
+int CIDS_uEye::OnUsbRetryMax(MM::PropertyBase* pProp, MM::ActionType eAct)
+{
+   
+   if (eAct == MM::AfterSet)
+   {
+      long usbRetry;
+      pProp->Get(usbRetry);
+
+      usbRetryMax_ = (usbRetry>10)?(usbRetry):(10);
+   }
+   else if (eAct == MM::BeforeGet)
+   {
+      pProp->Set(usbRetryMax_);
+   }
+
+   return DEVICE_OK;
+}
+
+/**
+* Handles "UsbRetrySleep" property.
+*/
+int CIDS_uEye::OnUsbRetrySleep(MM::PropertyBase* pProp, MM::ActionType eAct)
+{
+   
+   if (eAct == MM::AfterSet)
+   {
+      long usbSleep;
+      pProp->Get(usbSleep);
+
+      usbRetrySleep_ = (usbSleep>0)?(usbSleep):(0);
+   }
+   else if (eAct == MM::BeforeGet)
+   {
+      pProp->Set(usbRetrySleep_);
+   }
+
+   return DEVICE_OK;
+}
+
+
 
 int CIDS_uEye::OnDropPixels(MM::PropertyBase* pProp, MM::ActionType eAct)
 {

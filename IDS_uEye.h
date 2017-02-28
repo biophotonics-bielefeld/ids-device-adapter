@@ -67,7 +67,9 @@ using namespace std;
 #define EXPOSURE_MAX 10000               //maximal exposure (ms) to use, even if the camera reports higher values
 #define UEYE_RINGBUFFER_SIZE 128		 //maximum size of async ringbuffer, in MB	 
 #define UEYE_MAX_RINGBUFFER_ELEMENTS 128 //maximum number of images in ringbuffer
-#define UEYE_MAX_ASYNC_RETRIEVE_RETRY 20 //maximum number of retries when async image wait fails with "IS_CANT_OPEN_DEVICE"
+
+// This has been replaced by runtime-settable usbRetryMax_
+//#define UEYE_MAX_ASYNC_RETRIEVE_RETRY 20 //maximum number of retries when async image wait fails with "IS_CANT_OPEN_DEVICE"
 
 //////////////////////////////////////////////////////////////////////////////
 // Error codes
@@ -314,6 +316,8 @@ class CIDS_uEye : public CCameraBase<CIDS_uEye>
   int OnFlashMode(MM::PropertyBase* pProp, MM::ActionType eAct);
   int OnVideoSyncMode(MM::PropertyBase* pProp, MM::ActionType eAct);
   int OnGpioSeqTrigger(MM::PropertyBase* pProp, MM::ActionType eAct);
+  int OnUsbRetryMax(MM::PropertyBase* pProp, MM::ActionType eAct);
+  int OnUsbRetrySleep(MM::PropertyBase* pProp, MM::ActionType eAct);
 
 
  private:
@@ -377,9 +381,11 @@ class CIDS_uEye : public CCameraBase<CIDS_uEye>
   string binModeName_;                                          //name of the current binning mode
 
   
-  bool videoFastMode_;
-  int  gpioOutputMode_;
-  
+  bool videoFastMode_;		// if to run in async buffered video mode
+  int  gpioOutputMode_;		// how to set the GPIO output
+  long usbRetryMax_;		// retry how often on USB transfer error
+  long usbRetrySleep_;		// retry after x milliseconds
+
   bool dropPixels_;
   bool saturatePixels_;
   double fractionOfPixelsToDropOrSaturate_;
